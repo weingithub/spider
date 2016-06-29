@@ -73,7 +73,7 @@ int SuperSpider::Init(string url, uint8_t type)
         
     memset(szcmd, 0, sizeof(szcmd));
     
-    sprintf(szcmd, "rpush %s %s", szkey, m_root.c_str());
+    sprintf(szcmd, "sadd %s %s", szkey, m_root.c_str());
     vctcmd.push_back(szcmd);
     
     
@@ -252,24 +252,14 @@ int SuperSpider::AddTargetToList(uint8_t deepth)
 
     //判断指定key是否存在
     char szcmd[100] = {0};
-    
-    sprintf(szcmd, "lindex %s 0", szkey); //查询该key的头元素
-
-    vector<string>  vctresult;
-    
-    int ret = ExecRedisCommand(szcmd, vctresult);
-
-    if (ret)
-    {
-        return ret;
-    }
-    
-        
+ 
     //进行循环前，删除下一个可能存在的list
     memset(szcmd, 0, sizeof(szcmd));
     sprintf(szcmd, "del  %s_%d", m_root.c_str(), deepth + 1); //查询该key的所有元素
     
-    ret = ExecRedisCommand(szcmd, vctresult);
+    vector<string>  vctresult;
+    
+    int ret = ExecRedisCommand(szcmd, vctresult);
         
     if (0 != ret)
     {
@@ -278,7 +268,7 @@ int SuperSpider::AddTargetToList(uint8_t deepth)
     
     vctresult.clear();
     memset(szcmd, 0, sizeof(szcmd));
-    sprintf(szcmd, "lrange  %s 0  -1", szkey); //查询该key的所有元素
+    sprintf(szcmd, "smembers  %s", szkey); //查询该key的所有元素
     
     ret = ExecRedisCommand(szcmd, vctresult);
         
@@ -286,6 +276,11 @@ int SuperSpider::AddTargetToList(uint8_t deepth)
     {
         return ret;
     } 
+    
+    if (0 == vctresult.size())  //如果没有值，则递归到此结束
+    {
+        return 0;
+    }
    
     //获取该key的所有键值
 	int current = 0;
@@ -640,7 +635,7 @@ int SuperSpider::ParseResponse(uint8_t * pdata, int len, LPUrlInfo pCurrent, str
     {
         if (start == 0)
         {
-            command = string("rpush ") + szkey + vcthost[i];
+            command = string("sadd ") + szkey + vcthost[i];
         }            
         else if (LIMIT == start)  //执行命令
         {
