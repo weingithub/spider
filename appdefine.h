@@ -33,7 +33,7 @@ typedef  unsigned int   uint32_t;
     {                                           \
         pDstData = new char[sLen + 1];          \
         memset(pDstData, 0, sLen + 1);          \
-        memcpy(pDstData, pSrcData, sLen);       \R_REDIS_NIL
+        memcpy(pDstData, pSrcData, sLen);       \
     }											\
 }		
 

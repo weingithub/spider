@@ -11,7 +11,7 @@
 
 using namespace std;
 
-const int MAX_THREAD_NUM = 50;
+const int MAX_THREAD_NUM = 20;
 const int MAX_DEEPTH = 6;
 const int DEFAULT_PAGE_BUF_SIZE = 1048576;   //1M
 
@@ -47,6 +47,18 @@ int SuperSpider::Init(string url, uint8_t type)
 
         return 1;
     }
+    /*
+    //设置redis读取超时
+    struct timeval tv;
+	tv.tv_sec = 60;	// 设置读超时
+	tv.tv_usec = 200;
+    
+    if (REDIS_OK != redisSetTimeout(m_pRedisContext, tv))
+    {
+        cerr<<"设置超时失败"<<endl;
+        return 1;
+    }
+    */
     
     vector<string> vctcmd;
     
@@ -188,6 +200,11 @@ int SuperSpider::ExecRedisCommand(const char * pcommand, vector<string> & vctres
 {
     redisReply * reply = (redisReply*) redisCommand(m_pRedisContext, pcommand);
 
+    if (NULL == reply)
+    {
+        cerr<<"执行command报错。错误代号是:"<<m_pRedisContext->err<<",错误内容是:"<<m_pRedisContext->errstr<<endl;    
+    }
+    
     int ret = GetValue(reply, vctresult);
     
     if (0 != ret)
@@ -247,6 +264,18 @@ int SuperSpider::AddTargetToList(uint8_t deepth)
         return ret;
     }
     
+        
+    //进行循环前，删除下一个可能存在的list
+    memset(szcmd, 0, sizeof(szcmd));
+    sprintf(szcmd, "del  %s_%d", m_root.c_str(), deepth + 1); //查询该key的所有元素
+    
+    ret = ExecRedisCommand(szcmd, vctresult);
+        
+    if (0 != ret)
+    {
+        return ret;
+    } 
+    
     vctresult.clear();
     memset(szcmd, 0, sizeof(szcmd));
     sprintf(szcmd, "lrange  %s 0  -1", szkey); //查询该key的所有元素
@@ -257,26 +286,17 @@ int SuperSpider::AddTargetToList(uint8_t deepth)
     {
         return ret;
     } 
-    
-    
-    //进行循环前，删除下一个可能存在的list
-    vector<string> vcttemp;
-    memset(szcmd, 0, sizeof(szcmd));
-    sprintf(szcmd, "del  %s_%d", m_root.c_str(), deepth + 1); //查询该key的所有元素
-    
-    ret = ExecRedisCommand(szcmd, vcttemp);
-        
-    if (0 != ret)
-    {
-        return ret;
-    } 
-
+   
     //获取该key的所有键值
 	int current = 0;
 	pthread_t threads[MAX_THREAD_NUM] = {0};
 
     //深度递归，如何实现爬虫的宽度递归??
     //链表的数据结构，貌似不合适宽度递归，要用宽度递归，只需记录接下来待访问的网址集合，访问完之后就清除集合
+    //进入子线程前，记录当前novel type
+    int oldtype = m_type;
+    cout<<"当前层数"<<(int)deepth<<",当前查询条件:"<<szcmd<<",结果个数:"<<vctresult.size()<<endl;
+    
 	for(int i = 0; i < vctresult.size(); ++i)  //爬取的深度控制
 	{
 		if (current < MAX_THREAD_NUM)  //线程数目控制
@@ -295,7 +315,7 @@ int SuperSpider::AddTargetToList(uint8_t deepth)
                 LPUrlInfo purlInfo =  new TUlrInfo;
 				
 				purlInfo->deepth = deepth;
-                purlInfo->parsetype = m_type;
+                purlInfo->parsetype = oldtype;
                 purlInfo->hostname = vctresult[i];
                 
                 tParam->purlInfo = (void *) purlInfo;
@@ -388,7 +408,7 @@ int SuperSpider::GetResponse(string url, LPUrlInfo purl)
 	
 	if (0 != ret)
 	{
-		cerr<<"解析DNS失败:"<<host<<endl;
+		cerr<<"解析DNS失败:"<<host<<",原始url是:"<<purl->hostname<<endl;
 		return ret;
 	}
 	
@@ -405,8 +425,15 @@ int SuperSpider::GetResponse(string url, LPUrlInfo purl)
 	
 	//组装请求报文
 	
-	string request = "GET " + resource + " HTTP/1.1\r\nHost:" + host + "\r\nConnection:Close\r\n\r\n";
+	string request = "GET " + resource + " HTTP/1.1\r\nHost:" + host + "\r\nConnection:Close\r\nUser-Agent: Mozilla/4.0\r\n\r\n";
 	
+    //设置超时时间，防止无限期阻塞
+	struct timeval tv;
+	tv.tv_sec = 20;	// 设置读超时
+	tv.tv_usec = 200;
+	
+    (void)setsockopt( sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv) );
+    
 	//发送数据
 	if( -1 == send( sockfd, request.c_str(), request.size(), 0 ) )
 	{
@@ -414,8 +441,7 @@ int SuperSpider::GetResponse(string url, LPUrlInfo purl)
 		close( sockfd );
 		return 1;
 	}
-	
-	
+
 	//等待接收数据
 	int m_nContentLength = DEFAULT_PAGE_BUF_SIZE;
 	uint8_t * pageBuf = new uint8_t[m_nContentLength];
@@ -423,7 +449,6 @@ int SuperSpider::GetResponse(string url, LPUrlInfo purl)
 	
 	int bytesRead = 0;
 	ret = 1;
-	cout <<"Read START: ";
 	
     while(ret > 0)
     {
@@ -446,11 +471,14 @@ int SuperSpider::GetResponse(string url, LPUrlInfo purl)
     
     cout<<"收到的网页大小是:"<<bytesRead<<endl;
 
-    string path = "output/";
-    filename = path + filename;
-	//解析报文
-	ParseResponse(pageBuf, bytesRead, purl, url, filename);
-	
+    if (0 != bytesRead)
+    {
+        string path = "output/";
+        filename = path + filename;
+        //解析报文
+        ParseResponse(pageBuf, bytesRead, purl, url, filename);
+    }
+    
 	close( sockfd );
     
     delete[] pageBuf;
