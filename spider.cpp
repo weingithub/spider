@@ -6,6 +6,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <stdlib.h>
+#include <openssl/md5.h>
 
 #include "spider.h"
 
@@ -14,15 +15,18 @@ using namespace std;
 const int MAX_THREAD_NUM = 20;
 const int MAX_DEEPTH = 6;
 const int DEFAULT_PAGE_BUF_SIZE = 1048576;   //1M
+const int MAX_LENGTH = 1000;
 
 SuperSpider::SuperSpider():m_pRedisContext(NULL)
 {
     cout<<"SuperSpider构造函数"<<endl;
+    pthread_mutex_init(&redis_mutex, NULL);
 }
 
 SuperSpider::~SuperSpider()
 {
     cout<<"SuperSpider 准备析构"<<endl;
+    pthread_mutex_destroy(&redis_mutex); 
 }
 
     
@@ -34,6 +38,7 @@ int SuperSpider::Init(string url, uint8_t type)
     struct timeval timeout = {2, 0};    //2s的超时时间
      
     m_pRedisContext = (redisContext*) redisConnectWithTimeout("127.0.0.1", 6379, timeout);
+    
     if ( (NULL == m_pRedisContext) || (m_pRedisContext->err) )
     {
         if (m_pRedisContext)
@@ -47,172 +52,39 @@ int SuperSpider::Init(string url, uint8_t type)
 
         return 1;
     }
-    /*
-    //设置redis读取超时
-    struct timeval tv;
-	tv.tv_sec = 60;	// 设置读超时
-	tv.tv_usec = 200;
+
+    //设置redis的根路径初始值
+    InitRedisRoot();
     
-    if (REDIS_OK != redisSetTimeout(m_pRedisContext, tv))
-    {
-        cerr<<"设置超时失败"<<endl;
-        return 1;
-    }
-    */
+    return 0;
+}
+
+int SuperSpider::InitRedisRoot()
+{
+    string strmd5;
+    GetMD5(m_root, strmd5);
     
     vector<string> vctcmd;
     
-    char szkey[50] = {0};
-    char szcmd[100] = {0};
+    char szkey[100] = {0};
+    char szcmd[MAX_LENGTH] = {0};
        
     sprintf(szkey, "%s_%d", m_root.c_str(), 1);
     
     sprintf(szcmd, "del %s ", szkey);
-    
     vctcmd.push_back(szcmd);
-        
+       
     memset(szcmd, 0, sizeof(szcmd));
-    
-    sprintf(szcmd, "sadd %s %s", szkey, m_root.c_str());
+    sprintf(szcmd, "hmset %s_%d content %s href %s", strmd5.c_str(), 1, m_root.c_str(), m_root.c_str());
     vctcmd.push_back(szcmd);
-    
-    
-    vector<redisReply *> vctReply;
-    
-    ExecRedisMultiCommand(vctcmd, vctReply);
-    
-    //释放reply的对象
-    for(vector<redisReply *>::iterator riter = vctReply.begin(); riter != vctReply.end(); ++riter)
-    {
-        freeReplyObject(*riter);   
-    }
+       
+    memset(szcmd, 0, sizeof(szcmd));
+    sprintf(szcmd, "sadd %s %s|%d", szkey, strmd5.c_str(), 1);
+    vctcmd.push_back(szcmd);
+
+    ExecRedisMultiCommand(vctcmd);
 
 	return 0;
-}
-
-/*
-int SuperSpider::InsertHostToRedis(const char * pHost, const char * pContent, int deep)
-{
-    //初始化第一层路径
-    char szcmd[100] = {0};
-    char szkey[50] = {0};
-    
-    sprintf(szkey, "%s_%d", m_root.c_str(), deep);
-    vector<string> vctcmd;
-    
-    sprintf(szcmd, "rpush %s %s", szkey, pHost);
-    vctcmd.push_back(szcmd);
-    
-    memset(szcmd, 0, sizeof(szcmd));
-    
-    sprintf(szcmd, "hset %s content %s", szkey, pContent);
-    vctcmd.push_back(szcmd);
-    
-    vector<redisReply *> vctReply;
-    
-    ExecRedisMultiCommand(vctcmd, vctReply);
-    
-    //释放reply的对象
-    for(vector<redisReply *>::iterator riter = vctReply.begin(); riter != vctReply.end(); ++riter)
-    {
-        freeReplyObject(*riter);   
-    }
-    
-    return 0;
-}
-
-*/
-
-int SuperSpider::GetValue(redisReply * preply, vector<string> & vctresult, int flag)
-{
-    if (NULL == preply)
-    {
-        return 0;
-    }
-    
-    /*
-        #define REDIS_REPLY_STRING 1
-        #define REDIS_REPLY_ARRAY 2
-        #define REDIS_REPLY_INTEGER 3
-        #define REDIS_REPLY_NIL 4
-        #define REDIS_REPLY_STATUS 5
-        #define REDIS_REPLY_ERROR 6
-    */
-    int ret = 0;
-    
-    switch (preply->type)
-    {
-        case REDIS_REPLY_STRING:
-        case REDIS_REPLY_STATUS: vctresult.push_back(preply->str);break;
-        case REDIS_REPLY_ERROR:   ret= R_REDIS_ERROR; break;
-        case REDIS_REPLY_INTEGER: 
-        {
-            char sznum[20] = {0};
-            sprintf(sznum, "%lld", preply->integer);
-            vctresult.push_back(sznum); break;
-        }
-        case REDIS_REPLY_NIL:  ret = R_REDIS_NIL; break;
-        case REDIS_REPLY_ARRAY:
-        {
-            for (int i = 0; i < preply->elements; ++i)
-            {
-                GetValue(preply->element[i], vctresult, 1);
-            }
-            
-            break;
-        }
-        
-        default:break;
-    }
-    
-    if (1 != flag)  //加上标志位，区分是否数组产生的递归，因为释放数组时，会自动释放数组内的元素，而无须再重复释放
-    {
-        freeReplyObject(preply);   
-    }
-    
-    return ret;
-}
-
-int SuperSpider::ExecRedisMultiCommand(vector<string> vctcmd, vector<redisReply *> &vctReply)
-{
-     redisReply* reply = NULL;
-    //对pipeline返回结果的处理方式，和前面代码的处理方式完全一直，这里就不再重复给出了。
-
-    //问题如下
-    //当中途遇到错误时，是怎么处理的?剩下的几个命令是否会继续执行
-    for(int i = 0; i < vctcmd.size(); ++i)
-    {
-       redisAppendCommand(m_pRedisContext, vctcmd[i].c_str());
-    }
-
-    int ret = 0;
-    
-    for(int i = 0; i < vctcmd.size(); ++i)
-    {
-        ret = redisGetReply(m_pRedisContext, (void**)&reply);
-        vctReply.push_back(reply);    
-    }
-    
-    return 0;
-}
-
-int SuperSpider::ExecRedisCommand(const char * pcommand, vector<string> & vctresult)
-{
-    redisReply * reply = (redisReply*) redisCommand(m_pRedisContext, pcommand);
-
-    if (NULL == reply)
-    {
-        cerr<<"执行command报错。错误代号是:"<<m_pRedisContext->err<<",错误内容是:"<<m_pRedisContext->errstr<<endl;    
-    }
-    
-    int ret = GetValue(reply, vctresult);
-    
-    if (0 != ret)
-    {
-        cerr<<"执行命令:"<<pcommand<<",结果:"<<ret<<endl;
-    }
-    
-    return ret;
 }
 
 int SuperSpider::Run()
@@ -228,9 +100,6 @@ int SuperSpider::Run()
     uint8_t start = 1;
     
 	AddTargetToList(start);
-		
-	//循环完毕
-	PrintLink();
 	
     cout<<"运行完毕"<<endl;
 	return 0;
@@ -246,16 +115,16 @@ int SuperSpider::AddTargetToList(uint8_t deepth)
         return 0;
     }
     
-    char szkey[50] = {0};
+    char szkey[100] = {0};
     sprintf(szkey, "%s_%d", m_root.c_str(), deepth);
     cout<<"调用AddTargetToList, 当前key是:"<<szkey<<endl;
 
     //判断指定key是否存在
-    char szcmd[100] = {0};
+    char szcmd[MAX_LENGTH] = {0};
  
-    //进行循环前，删除下一个可能存在的list
+    //进行循环前，删除下一个可能存在的set
     memset(szcmd, 0, sizeof(szcmd));
-    sprintf(szcmd, "del  %s_%d", m_root.c_str(), deepth + 1); //查询该key的所有元素
+    sprintf(szcmd, "del  %s_%d", m_root.c_str(), deepth + 1); 
     
     vector<string>  vctresult;
     
@@ -267,21 +136,16 @@ int SuperSpider::AddTargetToList(uint8_t deepth)
     } 
     
     vctresult.clear();
-    memset(szcmd, 0, sizeof(szcmd));
-    sprintf(szcmd, "smembers  %s", szkey); //查询该key的所有元素
     
-    ret = ExecRedisCommand(szcmd, vctresult);
-        
-    if (0 != ret)
-    {
-        return ret;
-    } 
+    //获取当前层的所有下一个要访问的url
     
-    if (0 == vctresult.size())  //如果没有值，则递归到此结束
+    ret = GetCurrentResult(szkey, vctresult);
+   
+    if (0 == vctresult.size())
     {
         return 0;
     }
-   
+    
     //获取该key的所有键值
 	int current = 0;
 	pthread_t threads[MAX_THREAD_NUM] = {0};
@@ -290,7 +154,6 @@ int SuperSpider::AddTargetToList(uint8_t deepth)
     //链表的数据结构，貌似不合适宽度递归，要用宽度递归，只需记录接下来待访问的网址集合，访问完之后就清除集合
     //进入子线程前，记录当前novel type
     int oldtype = m_type;
-    cout<<"当前层数"<<(int)deepth<<",当前查询条件:"<<szcmd<<",结果个数:"<<vctresult.size()<<endl;
     
 	for(int i = 0; i < vctresult.size(); ++i)  //爬取的深度控制
 	{
@@ -344,11 +207,48 @@ int SuperSpider::AddTargetToList(uint8_t deepth)
     return 0 ;
 }
 
-int SuperSpider::PrintLink()
+int SuperSpider::GetCurrentResult(const char * pkey, vector<string> & vctresult)
 {
-	//m_url_list.Print(m_url_list.GetRoot());
-	
-	return 0;
+    char szcmd[MAX_LENGTH] = {0};
+     
+    vector<string> vcttemp;
+    
+    memset(szcmd, 0, sizeof(szcmd));
+    sprintf(szcmd, "smembers  %s", pkey); //查询该key的所有元素
+    
+    int ret = ExecRedisCommand(szcmd, vcttemp);
+        
+    if (0 != ret)
+    {
+        return ret;
+    } 
+    
+    if (0 == vcttemp.size())  //如果没有值，则递归到此结束
+    {
+        return 0;
+    }
+    
+    for(int i = 0; i < vcttemp.size(); ++i)
+    {
+        //结果的形式是md5|个数
+        int pos = vcttemp[i].find('|');
+        
+        string strmd5 = vcttemp[i].substr(0, pos);
+        int nums = atoi(vcttemp[i].substr(pos + 1).c_str());
+        
+        //获取实际内容中的链接
+        for(int j = 0; j < nums; ++j)
+        {
+            memset(szcmd, 0, sizeof(szcmd));
+            sprintf(szcmd, "hget %s_%d href", strmd5.c_str(), j+1); //查询hash中的href
+            
+            ExecRedisCommand(szcmd, vctresult);
+        }
+    }
+
+    cout<<"当前key:"<<pkey<<",结果个数:"<<vctresult.size()<<endl;
+    
+    return 0;    
 }
 
 int SuperSpider::WaitThread(pthread_t * thread, int num)
@@ -370,16 +270,12 @@ void * SuperSpider::AccessTargetThread(void * vParam)
     
 	assert(NULL != spider);
 	assert(NULL != purl);
-	//先睡眠5s
-	sleep(5);
-	
-	string response ="hello world!";
-	
-	//cout<<"First:"<<purl->hostname<<endl;
+    
+	//先睡眠1s
+	sleep(1);
+    
 	spider->GetResponse(purl->hostname, purl);
-	
-	//spider->ParseResponse(response, purl);
-	
+
     //释放内存
     delete pThread;
     
@@ -388,16 +284,15 @@ void * SuperSpider::AccessTargetThread(void * vParam)
 
 int SuperSpider::GetResponse(string url, LPUrlInfo purl)
 {
-    //cout<<"GetResponse, 集合的长度:"<<m_dns.m_HostInfo.size()<<endl;
 	string host;
 	string resource;
 	string filename;
     
 	ParseURL(url, host, resource, filename);
 
-    m_dns.Print();
+    //m_dns.Print();
+    
 	string ip;
-	//DNSResolve m_dns;
     
 	int ret = m_dns.Resolve(host, ip);
 	
@@ -424,7 +319,7 @@ int SuperSpider::GetResponse(string url, LPUrlInfo purl)
 	
     //设置超时时间，防止无限期阻塞
 	struct timeval tv;
-	tv.tv_sec = 20;	// 设置读超时
+	tv.tv_sec = 60;	// 设置读超时
 	tv.tv_usec = 200;
 	
     (void)setsockopt( sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv) );
@@ -461,9 +356,7 @@ int SuperSpider::GetResponse(string url, LPUrlInfo purl)
 		}
         
     }
-	
-	//pageBuf[bytesRead] = 0;
-    
+
     cout<<"收到的网页大小是:"<<bytesRead<<endl;
 
     if (0 != bytesRead)
@@ -585,15 +478,31 @@ int SuperSpider::ParseResponse(uint8_t * pdata, int len, LPUrlInfo pCurrent, str
     
     pParse->ParseHtml((char *)pdata + offset, pCurrent->parsetype, vctHtmlInfo);
     
-    string hostname;
-    LPHtmlInfo pHtml = NULL;
-    
     char szkey[50] = {0};
     sprintf(szkey, "%s_%d ", m_root.c_str(), pCurrent->deepth + 1);
-    char szcmd[300] = {0};
-    vector<string> vcthost;
+
+    InsertHtmlInfoToRedis(szkey, vctHtmlInfo, url);
     
+	return 0;
+}
+
+int SuperSpider::InsertHtmlInfoToRedis(const char * pkey, vector<LPHtmlInfo> & vctHtmlInfo, string & url)
+{
+    string md5str;
+    
+    //对url做md5运算
+    GetMD5(url, md5str);
+    
+    vector<string> vctkey;
+    vector<string> vctcontent;
+    vector<string> vcthref;
+      
+    string strcmd;
+    char szTemp[100] = {0};
+    int start = 0;
     set<string> seturl;
+    LPHtmlInfo pHtml = NULL;
+    string hostname;
     
     for (int i = 0; i < vctHtmlInfo.size(); ++i)
     {
@@ -615,54 +524,223 @@ int SuperSpider::ParseResponse(uint8_t * pdata, int len, LPUrlInfo pCurrent, str
         
         if (seturl.end() == seturl.find(hostname))
         {
-            vcthost.push_back(hostname);
-        
             if (m_type != pHtml->nexttype)
             {
                 m_type = pHtml->nexttype;
             }
             
             seturl.insert(hostname);
+            
+            ++start;
+            
+            // vector<string> vctkey;
+            // vector<string> vctcontent;
+            // vector<string> vcthref;
+            
+            memset(szTemp, 0, sizeof(szTemp));
+            //暂时遇到中文中有空格，导致命令参数对应不上问题            
+            sprintf(szTemp, "%s_%d", md5str.c_str(), start);
+            
+            vctkey.push_back(szTemp);
+            vcthref.push_back(hostname);
+            vctcontent.push_back(pHtml->pContent != NULL ? pHtml->pContent : hostname.c_str());
         }
     }
     
-    const int LIMIT = 30;
-    int start = 0;
-    string command;
+    //先将实际内容写入redis中，如果成功，再将映射的信息写入redis
+    if (0 == vctkey.size())
+    {
+        return 0;
+    }
+    
+    //批量执行
+    int ret = ExecSpecialRedisMultiCommand(vctkey, vctcontent, vcthref);
+    
+    if (ret)
+    {
+        return ret;
+    }
+    
+    char setval[50] = {0};
+    
+    sprintf(setval, "%s|%d", md5str.c_str(), start);
+    
+    char szcmd[300] = {0};
+    sprintf(szcmd, "sadd %s %s", pkey, setval);
     vector<string>  vctresult;
     
-    for (int i = 0; i < vcthost.size(); ++i)
+    ret = ExecRedisCommand(szcmd, vctresult);
+            
+    return ret;        
+}
+
+int SuperSpider::ExecSpecialRedisMultiCommand(vector<string> & vctkey, vector<string> & vctcontent, vector<string> & vcthref)
+{
+    redisReply* reply = NULL;
+    //问题如下
+    //当中途遇到错误时，是怎么处理的?剩下的几个命令是否会继续执行
+    //加锁
+    pthread_mutex_lock(&redis_mutex); 
+    
+    for(int i = 0; i < vctkey.size(); ++i)
     {
-        if (start == 0)
-        {
-            command = string("sadd ") + szkey + vcthost[i];
-        }            
-        else if (LIMIT == start)  //执行命令
-        {
-            command += string(" ") + vcthost[i];
-            cout<<"内部执行插入命令"<<endl;
-            ExecRedisCommand(command.c_str(), vctresult);
-            start = -1;  
-        }
-        else
-        {
-            command += string(" ") + vcthost[i];
-        }
-        
-        ++start;
+       redisAppendCommand(m_pRedisContext,  "hmset %s content %s href %s", vctkey[i].c_str(), vctcontent[i].c_str(), vcthref[i].c_str());
     }
     
-    if (!command.empty())
+    int ret = 0;
+    
+    for(int i = 0; i < vctkey.size(); ++i)
     {
-        cout<<"外部执行命令"<<endl;
-        ExecRedisCommand(command.c_str(), vctresult);
+        ret = redisGetReply(m_pRedisContext, (void**)&reply);
+        
+        if (REDIS_REPLY_ERROR == reply->type)
+        {
+            cerr<<"执行批量命令:"<<vcthref[i]<<"出错，错误原因是:"<<reply->str<<endl;
+            ret = 1;
+        }
+        
+        freeReplyObject(reply);   
+    }
+    
+    //解锁
+    pthread_mutex_unlock(&redis_mutex); 
+    
+    return ret;    
+}
+
+int SuperSpider::ExecRedisMultiCommand(vector<string> & vctcmd)
+{
+    redisReply* reply = NULL;
+    //问题如下
+    //当中途遇到错误时，是怎么处理的?剩下的几个命令是否会继续执行
+    //加锁
+    pthread_mutex_lock(&redis_mutex); 
+    
+    for(int i = 0; i < vctcmd.size(); ++i)
+    {
+       redisAppendCommand(m_pRedisContext, vctcmd[i].c_str());
+    }
+    
+    int ret = 0;
+    
+    for(int i = 0; i < vctcmd.size(); ++i)
+    {
+        ret = redisGetReply(m_pRedisContext, (void**)&reply);
+        
+        if (REDIS_REPLY_ERROR == reply->type)
+        {
+            cerr<<"执行批量命令:"<<vctcmd[i]<<"出错，错误原因是:"<<reply->str<<endl;
+            ret = 1;
+        }
+        
+        freeReplyObject(reply);   
+    }
+    
+    //解锁
+    pthread_mutex_unlock(&redis_mutex); 
+    
+    return ret;
+}
+
+int SuperSpider::ExecRedisCommand(const char * pcommand, vector<string> & vctresult)
+{
+    //加锁
+    pthread_mutex_lock(&redis_mutex); 
+
+    redisReply * reply = (redisReply*) redisCommand(m_pRedisContext, pcommand);
+    
+    int ret = 0;
+    
+    if (NULL == reply)
+    {
+        cerr<<"执行command报错。错误代号是:"<<m_pRedisContext->err<<",错误内容是:"<<m_pRedisContext->errstr<<endl;    
+        ret = 1;
     }
     else
     {
-        cerr<<"该url："<<url<<"对应的子节点空"<<endl;
+        ret = GetValue(reply, vctresult);
+        
+        if (0 != ret && R_REDIS_NIL != ret)
+        {
+            cerr<<"执行单个命令:"<<pcommand<<",结果:"<<ret<<"错误原因:"<<m_pRedisContext->errstr<<endl;
+        }
     }
-	
-	return 0;
+   
+    //解锁
+    pthread_mutex_unlock(&redis_mutex); 
+    
+    return ret;
+}
+
+int SuperSpider::GetValue(redisReply * preply, vector<string> & vctresult, int flag)
+{
+    if (NULL == preply)
+    {
+        return 0;
+    }
+    
+    /*
+        #define REDIS_REPLY_STRING 1
+        #define REDIS_REPLY_ARRAY 2
+        #define REDIS_REPLY_INTEGER 3
+        #define REDIS_REPLY_NIL 4
+        #define REDIS_REPLY_STATUS 5
+        #define REDIS_REPLY_ERROR 6
+    */
+    int ret = 0;
+    
+    switch (preply->type)
+    {
+        case REDIS_REPLY_STRING:
+        case REDIS_REPLY_STATUS: vctresult.push_back(preply->str);break;
+        case REDIS_REPLY_ERROR:   ret= R_REDIS_ERROR; break;
+        case REDIS_REPLY_INTEGER: 
+        {
+            char sznum[20] = {0};
+            sprintf(sznum, "%lld", preply->integer);
+            vctresult.push_back(sznum); break;
+        }
+        case REDIS_REPLY_NIL:  ret = R_REDIS_NIL; break;
+        case REDIS_REPLY_ARRAY:
+        {
+            for (int i = 0; i < preply->elements; ++i)
+            {
+                GetValue(preply->element[i], vctresult, 1);
+            }
+            
+            break;
+        }
+        
+        default:break;
+    }
+    
+    if (1 != flag)  //加上标志位，区分是否数组产生的递归，因为释放数组时，会自动释放数组内的元素，而无须再重复释放
+    {
+        freeReplyObject(preply);   
+    }
+    
+    return ret;
+}
+
+int SuperSpider::GetMD5(string & data, string &md5value)
+{
+    md5value.clear();
+    
+    unsigned char md[16];
+    char tmp[3]={0};
+    char sztemp[33] = {0};
+    
+    MD5((unsigned char *)data.c_str(), data.length(), md);
+        
+    for( int  i = 0; i < 16; i++ )
+    {
+        sprintf(tmp, "%02X", md[i]);
+        strcat(sztemp, tmp);
+    }
+    
+    md5value = sztemp;
+    
+    return 0;
 }
 
 int SuperSpider::ParseResponseHeader(string &data, int &offset)
@@ -736,26 +814,25 @@ int SuperSpider::SetRootUrl(string url)
 
 int main(int argc, char **argv)
 {
+    //增加选项
+    
 	string rooturl;
-	
-	if (1 == argc)
-	{
-		rooturl = string("www.baidu.com");
-	}
-	else
-	{
-		rooturl = string(argv[1]);
-	}
-	
-	SuperSpider spider;
-
+    
+    char ch;
     uint8_t type = 0;
     
-    if (rooturl.find("qidian.com"))
+	while((ch = getopt(argc, argv, "u:t:")) != EOF)
     {
-        type = NOVEL_INDEX;
+        switch(ch)
+        {
+            case 'u': rooturl = optarg;
+            case 't': type = atoi(optarg);
+            default :break;
+        }
     }
-    
+	
+	SuperSpider spider;
+ 
 	spider.Init(rooturl, type);  //类的结构被破坏,这是为什么?因为内存对齐问题
 	spider.Run();
 	

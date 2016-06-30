@@ -221,9 +221,8 @@ int QidianHtmlParse::ParseBookHref(CDocument & doc, vector<LPHtmlInfo>  & vctRes
     char szCondition[100] = {0};
     int i = 0;
     
-    
-    string value; 
     string herfvalue;
+    string contentvalue;
     
     int book = 0;
     char szCut[10] = ".txt";
@@ -244,21 +243,18 @@ int QidianHtmlParse::ParseBookHref(CDocument & doc, vector<LPHtmlInfo>  & vctRes
     //先搜索到链接
     for (int i = 0; i < c.nodeNum(); ++i)
     {
-        value = c.nodeAt(i).attribute("src");
-        Common::Str_trip(value);
+        herfvalue = c.nodeAt(i).attribute("src");
+        Common::Str_trip(herfvalue);
 
-        if (string::npos == value.find(szCut))
+        if (string::npos == herfvalue.find(szCut))
         {
             continue;
         }
-            
+         
         pHtmlInfo = new THtmlInfo;
          
-        MEMCPY(pHtmlInfo->pHref, value.c_str(), value.length());    
-        /*
-        cout<<"第"<<++book<<"个结果是:";
-        cout << value<<endl; // some link
-        */
+        MEMCPY(pHtmlInfo->pHref, herfvalue.c_str(), herfvalue.length());    
+        
         break;
     }
     
@@ -269,23 +265,21 @@ int QidianHtmlParse::ParseBookHref(CDocument & doc, vector<LPHtmlInfo>  & vctRes
     
     //再搜索章节名称
     memset(szCondition, 0, sizeof(szCondition));
-    sprintf(szCondition, "body div script[src]");
+    sprintf(szCondition, "body div.story_title h1");
     
     c = doc.find(szCondition);
     
     result = c.nodeNum();
-  
+        
     if (0 == result)
     {
-        delete pHtmlInfo;
         return 1;
     }
     
-    value = c.nodeAt(i).text();
-    Common::Str_trip(value);
-    
-    MEMCPY(pHtmlInfo->pContent, value.c_str(), value.length());  
-    
+    contentvalue = c.nodeAt(i).text();
+    Common::Str_trip(contentvalue);
+    MEMCPY(pHtmlInfo->pContent, contentvalue.c_str(), contentvalue.length());  
+        
     vctResult.push_back(pHtmlInfo);
     
     return 0;
